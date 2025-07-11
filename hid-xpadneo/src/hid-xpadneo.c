@@ -854,7 +854,68 @@ static int xpadneo_raw_event(struct hid_device *hdev, struct hid_report *report,
 	/* reset the count at the beginning of the frame */
 	xdata->count_abs_z_rz = 0;
 
-	/* we are taking care of the battery report ourselves */
+	/* Handle Nintendo controller raw reports - convert to Xbox format */
+	if ((xdata->quirks & XPADNEO_QUIRK_NINTENDO) && report->id == 1 && reportsize == 11) {
+		u8 nintendo_data[10];
+		u8 xbox_data[17] = {0x01, 0x7f, 0x7f, 0x7f, 0x7f, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+		
+		/* Copy original Nintendo data */
+		memcpy(nintendo_data, data, 10);
+		
+		/* Convert Nintendo format to Xbox format */
+		
+		/* Left analog stick (data[1], data[2]) */
+		xbox_data[1] = nintendo_data[1];  /* X axis */
+		xbox_data[2] = nintendo_data[2];  /* Y axis */
+		
+		/* Right analog stick (data[3], data[4]) */
+		xbox_data[3] = nintendo_data[3];  /* X axis */
+		xbox_data[4] = nintendo_data[4];  /* Y axis */
+		
+		/* D-PAD mapping (data[0]) - Xbox uses different bit positions */
+		xbox_data[5] = 0x0f;  /* Default: no D-PAD pressed */
+		switch (nintendo_data[0] & 0x0F) {
+		case 0x00: /* UP */
+			xbox_data[5] = 0x01;
+			break;
+		case 0x02: /* RIGHT */
+			xbox_data[5] = 0x02;
+			break;
+		case 0x04: /* DOWN */
+			xbox_data[5] = 0x04;
+			break;
+		case 0x06: /* LEFT */
+			xbox_data[5] = 0x08;
+			break;
+		}
+		
+		/* Triggers (data[5], data[6]) - scale from 0-255 to 0-1023 */
+		xbox_data[6] = nintendo_data[6];  /* Left trigger */
+		xbox_data[7] = nintendo_data[5];  /* Right trigger */
+		
+		///* Buttons (data[7], data[8]) - Nintendo to Xbox mapping */
+		if (nintendo_data[7] & 0x01) xbox_data[14] |= 0x01;  /* A -> A */
+		if (nintendo_data[7] & 0x02) xbox_data[14] |= 0x02;  /* B -> B */
+		if (nintendo_data[7] & 0x08) xbox_data[14] |= 0x04;  /* X -> X */
+		if (nintendo_data[7] & 0x10) xbox_data[14] |= 0x08;  /* Y -> Y */
+		if (nintendo_data[7] & 0x40) xbox_data[14] |= 0x10;  /* LB -> LB */
+		if (nintendo_data[7] & 0x80) xbox_data[14] |= 0x20;  /* RB -> RB */
+		
+		/* Additional buttons (data[8]) */
+		if (nintendo_data[8] & 0x04) xbox_data[15] |= 0x04;  /* MINUS -> Back */
+		if (nintendo_data[8] & 0x08) xbox_data[15] |= 0x08;  /* PLUS -> Menu */
+		if (nintendo_data[8] & 0x10) xbox_data[15] |= 0x10;  /* HOME -> Xbox */
+		if (nintendo_data[8] & 0x20) xbox_data[15] |= 0x20;  /* THUMBL -> LS */
+		if (nintendo_data[8] & 0x40) xbox_data[15] |= 0x40;  /* THUMBR -> RS */
+		
+		/* Copy the converted data back */
+		memcpy(data, xbox_data, 17);
+		reportsize = 17;
+		
+		hid_info(hdev, "Nintendo controller: converted report size %d to %d\n", 10, reportsize);
+	}
+
+	/*1we are taking care of the battery report ourselves */
 	if (xdata->battery.report_id && report->id == xdata->battery.report_id && reportsize == 2) {
 		xpadneo_update_psy(xdata, data[1]);
 		return -1;
@@ -1382,6 +1443,10 @@ static const struct hid_device_id xpadneo_devices[] = {
 	/* XBOX Series X|S / Xbox Wireless Controller (BLE) */
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, 0x0B13),
 	 .driver_data = XPADNEO_QUIRK_SHARE_BUTTON },
+
+    /* Nintendo Controllers */
+    { HID_BLUETOOTH_DEVICE(0x2DC8, 0x301B),
+    .driver_data = XPADNEO_QUIRK_NINTENDO },
 
 	/* SENTINEL VALUE, indicates the end */
 	{ }

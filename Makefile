@@ -34,7 +34,7 @@ help:
 .INTERMEDIATE: VERSION
 
 VERSION:
-	{ [ -n "$(VERSION)" ] && echo $(VERSION) || git describe --tags --dirty; } >$@
+	{ [ -n "$(VERSION)" ] && echo $(VERSION) || git describe --tags; } >$@
 
 build: VERSION
 	$(MAKE) VERSION="$(shell cat VERSION)" -C hid-xpadneo dkms.conf
