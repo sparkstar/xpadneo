@@ -753,6 +753,20 @@ static int xpadneo_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 			hid_map_usage_clear(hi, usage, bit, max, EV_KEY, BTN_START);
 			hid_info(hdev, "Nintendo: Remapped 0x9000C (PLUS button) to BTN_START\n");
 			return MAP_STATIC;
+		case 0x9000D: /* Nintendo HOME button */
+			hid_map_usage_clear(hi, usage, bit, max, EV_KEY, BTN_MODE);
+			hid_info(hdev, "Nintendo: Remapped 0x9000D (HOME button) to BTN_MODE\n");
+			return MAP_STATIC;
+		/* Nintendo analog stick remapping - fix right stick mapping */
+		case 0x010032: /* Generic Desktop - Z axis (used as right stick X by Nintendo) */
+			hid_map_usage_clear(hi, usage, bit, max, EV_ABS, ABS_RX);
+			hid_info(hdev, "Nintendo: Remapped 0x010032 (Z axis) to ABS_RX (right stick X)\n");
+			return MAP_STATIC;
+		case 0x010035: /* Generic Desktop - Rz axis (used as right stick Y by Nintendo) */
+			hid_map_usage_clear(hi, usage, bit, max, EV_ABS, ABS_RY);
+			hid_info(hdev, "Nintendo: Remapped 0x010035 (Rz axis) to ABS_RY (right stick Y)\n");
+			return MAP_STATIC;
+		
 		default:
 			hid_info(hdev, "Nintendo: Unhandled usage 0x%x - letting HID core handle it\n", usage->hid);
 			break;
@@ -1008,13 +1022,24 @@ static int xpadneo_input_configured(struct hid_device *hdev, struct hid_input *h
 		abs_max = 32767;
 	}
 
+	/* Nintendo controllers need smaller deadzone for better sensitivity */
+	if (xdata->quirks & XPADNEO_QUIRK_NINTENDO) {
+		deadzone = 512;  /* Much smaller deadzone for Nintendo controllers */
+		hid_info(hdev, "Nintendo: Using reduced deadzone (%d) for better analog stick sensitivity\n", deadzone);
+	}
+
 	input_set_abs_params(xdata->gamepad, ABS_X, abs_min, abs_max, 32, deadzone);
 	input_set_abs_params(xdata->gamepad, ABS_Y, abs_min, abs_max, 32, deadzone);
 	input_set_abs_params(xdata->gamepad, ABS_RX, abs_min, abs_max, 32, deadzone);
 	input_set_abs_params(xdata->gamepad, ABS_RY, abs_min, abs_max, 32, deadzone);
 
-	input_set_abs_params(xdata->gamepad, ABS_Z, 0, 1023, 4, 0);
-	input_set_abs_params(xdata->gamepad, ABS_RZ, 0, 1023, 4, 0);
+	/* Nintendo controllers use ABS_RX/RY for right stick, skip ABS_Z/RZ */
+	if (!(xdata->quirks & XPADNEO_QUIRK_NINTENDO)) {
+		input_set_abs_params(xdata->gamepad, ABS_Z, 0, 1023, 4, 0);
+		input_set_abs_params(xdata->gamepad, ABS_RZ, 0, 1023, 4, 0);
+	} else {
+		hid_info(hdev, "Nintendo: Skipping ABS_Z/ABS_RZ setup (using ABS_RX/ABS_RY for right stick)\n");
+	}
 
 	/* combine triggers to form a rudder, use ABS_MISC to order after dpad */
 	if (param_enable_rolling_axis) {
@@ -1027,11 +1052,12 @@ static int xpadneo_input_configured(struct hid_device *hdev, struct hid_input *h
 	__clear_bit(KEY_RECORD, xdata->gamepad->keybit);
 	__clear_bit(KEY_UNKNOWN, xdata->gamepad->keybit);
 
-	/* Nintendo controllers support BTN_C and BTN_Z buttons */
+	/* Nintendo controllers support BTN_C, BTN_Z, and BTN_MODE buttons */
 	if (xdata->quirks & XPADNEO_QUIRK_NINTENDO) {
 		__set_bit(BTN_C, xdata->gamepad->keybit);
 		__set_bit(BTN_Z, xdata->gamepad->keybit);
-		hid_info(hdev, "Nintendo: Added BTN_C (L4) and BTN_Z (R4) button support\n");
+		__set_bit(BTN_MODE, xdata->gamepad->keybit);
+		hid_info(hdev, "Nintendo: Added BTN_C (L4), BTN_Z (R4), and BTN_MODE (HOME) button support\n");
 	}
 
 	/* ensure all four paddles exist as part of the gamepad */
@@ -1069,6 +1095,39 @@ static int xpadneo_event(struct hid_device *hdev, struct hid_field *field,
 		case ABS_Y:
 		case ABS_RX:
 		case ABS_RY:
+			/* Nintendo controller analog stick value scaling */
+			if (xdata->quirks & XPADNEO_QUIRK_NINTENDO) {
+				s32 scaled_value;
+				
+				/* Nintendo controllers use 1-byte values (0-255, center=127) */
+				/* Convert to Xbox format (2-byte, -32768 to 32767, center=0) */
+				
+				if (usage->code == ABS_X || usage->code == ABS_Y || usage->code == ABS_RX || usage->code == ABS_RY) {
+					/* Convert Nintendo 8-bit (0-255) to Xbox 16-bit (-32768 to 32767) */
+					/* First clamp to 8-bit range in case we get weird values */
+					s32 clamped_value = clamp(value, 0, 255);
+					
+					/* Convert: (0-255, center=127) → (-32768 to 32767, center=0) */
+					scaled_value = ((clamped_value - 127) * 65535) / 255;
+					
+					/* Ensure we stay in valid range */
+					scaled_value = clamp(scaled_value, -32768, 32767);
+					
+					hid_info_once(hdev, "Nintendo: Analog stick scaling %d -> %d (axis %s)\n", 
+						value, scaled_value, 
+						(usage->code == ABS_X) ? "ABS_X" :
+						(usage->code == ABS_Y) ? "ABS_Y" :
+						(usage->code == ABS_RX) ? "ABS_RX" : "ABS_RY");
+				} else {
+					/* Other axes - use original value */
+					scaled_value = value;
+				}
+				
+				input_report_abs(gamepad, usage->code, scaled_value);
+				xdata->gamepad_sync = true;
+				goto stop_processing;
+			}
+			
 			/* Linux Gamepad Specification */
 			if (param_gamepad_compliance) {
 				input_report_abs(gamepad, usage->code, value - 32768);
@@ -1084,12 +1143,15 @@ static int xpadneo_event(struct hid_device *hdev, struct hid_field *field,
 			goto combine_z_axes;
 		}
 	} else if (!param_disable_shift_mode && (usage->type == EV_KEY)
-		   && (usage->code == BTN_XBOX)) {
+		   && (usage->code == BTN_XBOX) && !(xdata->quirks & XPADNEO_QUIRK_NINTENDO)) {
 		/*
 		 * Handle the Xbox logo button: We want to cache the button
 		 * down event to allow for profile switching. The button will
 		 * act as a shift key and only send the input events when
 		 * released without pressing an additional button.
+		 * 
+		 * NOTE: Nintendo controllers skip this special handling and treat
+		 * the HOME button as a regular button.
 		 */
 		if (!xdata->xbox_button_down && (value == 1)) {
 			/* cache this event */
